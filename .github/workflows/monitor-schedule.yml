@@ -2,8 +2,12 @@ name: Monitor AFC Schedule
 
 on:
   schedule:
-    # Run every 12 hours
-    - cron: '0 */12 * * *'
+    # Run at 9 AM, 12 PM, 6 PM, and 12 AM EST (UTC-5)
+    # Times in UTC: 14:00, 17:00, 23:00, 05:00
+    - cron: '0 5 * * *'   # 12:00 AM EST
+    - cron: '0 14 * * *'  # 9:00 AM EST
+    - cron: '0 17 * * *'  # 12:00 PM EST
+    - cron: '0 23 * * *'  # 6:00 PM EST
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
