@@ -1,0 +1,53 @@
+name: Monitor AFC Schedule
+
+on:
+  schedule:
+    # Run every 12 hours
+    - cron: '0 */12 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  check-schedule:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download previous state
+        continue-on-error: true
+        run: |
+          gh api repos/${{ github.repository }}/actions/artifacts \
+            --jq '.artifacts[] | select(.name == "schedule-state") | .id' \
+            | head -n 1 \
+            | xargs -I {} gh api repos/${{ github.repository }}/actions/artifacts/{}/zip > state.zip 2>/dev/null || true
+          if [ -f state.zip ]; then
+            unzip -o state.zip 2>/dev/null || true
+            rm state.zip
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Check schedule for updates
+        run: |
+          python monitor.py
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+
+      - name: Upload current state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: schedule-state
+          path: schedule_state.json
+          retention-days: 90
