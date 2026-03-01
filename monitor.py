@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AFC Schedule Monitor
-Monitors the Ambassadors FC schedule for changes and sends notifications via ntfy.sh
+Monitors one or more GotSport schedule URLs for changes and sends notifications via ntfy.sh
 """
 
 import requests
@@ -14,25 +14,35 @@ from datetime import datetime
 from bs4 import BeautifulSoup
 
 
-SCHEDULE_URL = "https://system.gotsport.com/org_event/events/46853/schedules?team=3577069"
+# Each entry: (label, url, state_file)
+SCHEDULES = [
+    (
+        "AFC 2014 Boys White",
+        "https://system.gotsport.com/org_event/events/46853/schedules?team=3577069",
+        "schedule_state_46853_3577069.json",
+    ),
+    (
+        "AFC 2014 Boys GLA",
+        "https://system.gotsport.com/org_event/events/43157/schedules?team=3151579",
+        "schedule_state_43157_3151579.json",
+    ),
+]
+
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "afc-schedule-updates")
-STATE_FILE = "schedule_state.json"
 
 
-def fetch_schedule():
+def fetch_schedule(url):
     """Fetch the schedule page content"""
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
-    response = requests.get(SCHEDULE_URL, headers=headers, timeout=30)
+    response = requests.get(url, headers=headers, timeout=30)
     response.raise_for_status()
     return response.text
 
 
 def parse_match_text(match_text):
     """Parse match text to extract structured data"""
-    # Example format: "Manta United Soccer Club Manta 2014 Boys GLA (H)2:00 PM ESTNov 08, 2025Ambassadors FC (OH) Ambassadors FC 2014 Boys White (A)"
-
     match_info = {
         'raw': match_text,
         'opponent': None,
@@ -58,20 +68,14 @@ def parse_match_text(match_text):
         match_info['score'] = score_match.group(1)
 
     # Extract opponent (team name before date/time, excluding "Ambassadors FC")
-    # Look for team name that's not Ambassadors FC
     if '(H)' in match_text and '(A)' in match_text:
-        # Split by date to get teams
         parts = match_text.split(match_info['date']) if match_info['date'] else [match_text]
         if len(parts) >= 1:
-            # The home team is before the date
             home_part = parts[0]
-            # Remove time if present
             if match_info['time']:
                 home_part = home_part.replace(match_info['time'], '')
-            # Remove score if present
             if match_info['score']:
                 home_part = home_part.replace(match_info['score'], '')
-            # Extract team name (ends with (H) or (A))
             home_team_match = re.search(r'([A-Z][^()]+?)\s*\([HA]\)', home_part)
             if home_team_match:
                 home_team = home_team_match.group(1).strip()
@@ -79,9 +83,8 @@ def parse_match_text(match_text):
                     match_info['opponent'] = home_team
                     match_info['location'] = 'Away'
                 else:
-                    # If home team is Ambassadors, opponent is away team
                     if len(parts) > 1:
-                        away_part = parts[1] if len(parts) > 1 else ''
+                        away_part = parts[1]
                         away_team_match = re.search(r'([A-Z][^()]+?)\s*\([HA]\)', away_part)
                         if away_team_match:
                             match_info['opponent'] = away_team_match.group(1).strip()
@@ -94,12 +97,8 @@ def parse_schedule(html_content):
     """Parse the schedule HTML and extract relevant information"""
     soup = BeautifulSoup(html_content, 'html.parser')
 
-    schedule_data = {
-        'matches': []
-    }
+    schedule_data = {'matches': []}
 
-    # Extract match information
-    # Look for match/game containers (structure may vary)
     matches = soup.find_all(['div', 'tr'], class_=lambda x: x and any(
         keyword in str(x).lower() for keyword in ['game', 'match', 'schedule-row']
     ))
@@ -119,22 +118,22 @@ def calculate_hash(data):
     return hashlib.sha256(json_str.encode()).hexdigest()
 
 
-def load_previous_state():
+def load_previous_state(state_file):
     """Load the previous schedule state"""
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, 'r') as f:
+    if os.path.exists(state_file):
+        with open(state_file, 'r') as f:
             return json.load(f)
     return None
 
 
-def save_state(data, data_hash):
+def save_state(state_file, data, data_hash):
     """Save the current schedule state"""
     state = {
         'hash': data_hash,
         'data': data,
         'timestamp': datetime.now().isoformat()
     }
-    with open(STATE_FILE, 'w') as f:
+    with open(state_file, 'w') as f:
         json.dump(state, f, indent=2)
 
 
@@ -142,16 +141,11 @@ def send_notification(title, message, priority="default", tags=None):
     """Send notification via ntfy.sh"""
     url = f"https://ntfy.sh/{NTFY_TOPIC}"
 
-    headers = {
-        "Priority": priority,
-    }
-
+    headers = {"Priority": priority}
     if tags:
         headers["Tags"] = ",".join(tags)
 
-    # Send title and message in the body
     full_message = f"{title}\n\n{message}"
-
     response = requests.post(url, data=full_message.encode('utf-8'), headers=headers)
     response.raise_for_status()
     print(f"Notification sent: {title}")
@@ -170,14 +164,7 @@ def format_match(match_info):
         parts.append(f"({match_info['location']})")
     if match_info.get('score'):
         parts.append(f"[Score: {match_info['score']}]")
-
     return ' '.join(parts) if parts else match_info.get('raw', 'Unknown match')
-
-
-def matches_equal(m1, m2):
-    """Check if two matches are the same (ignoring score changes)"""
-    return (m1.get('date') == m2.get('date') and
-            m1.get('opponent') == m2.get('opponent'))
 
 
 def detect_changes(old_data, new_data):
@@ -186,7 +173,6 @@ def detect_changes(old_data, new_data):
     detailed_changes = []
 
     if old_data is None:
-        # First run - list all matches
         new_matches = new_data.get('matches', [])
         detailed_changes.append(f"Initial schedule loaded with {len(new_matches)} match(es)")
         for match in new_matches:
@@ -196,46 +182,33 @@ def detect_changes(old_data, new_data):
     old_matches = old_data.get('matches', [])
     new_matches = new_data.get('matches', [])
 
-    # Create lookup by date+opponent
     old_lookup = {(m.get('date'), m.get('opponent')): m for m in old_matches}
     new_lookup = {(m.get('date'), m.get('opponent')): m for m in new_matches}
 
     old_keys = set(old_lookup.keys())
     new_keys = set(new_lookup.keys())
 
-    # Find added matches
     added_keys = new_keys - old_keys
     if added_keys:
         changes.append(f"Added: {len(added_keys)} match(es)")
         for key in sorted(added_keys):
-            match = new_lookup[key]
-            detailed_changes.append(f"✅ NEW MATCH: {format_match(match)}")
+            detailed_changes.append(f"✅ NEW MATCH: {format_match(new_lookup[key])}")
 
-    # Find removed matches
     removed_keys = old_keys - new_keys
     if removed_keys:
         changes.append(f"Removed: {len(removed_keys)} match(es)")
         for key in sorted(removed_keys):
-            match = old_lookup[key]
-            detailed_changes.append(f"❌ REMOVED: {format_match(match)}")
+            detailed_changes.append(f"❌ REMOVED: {format_match(old_lookup[key])}")
 
-    # Find modified matches (same date+opponent, but other details changed)
-    common_keys = old_keys & new_keys
-    for key in sorted(common_keys):
+    for key in sorted(old_keys & new_keys):
         old_match = old_lookup[key]
         new_match = new_lookup[key]
-
         match_changes = []
 
-        # Check time change
         if old_match.get('time') != new_match.get('time'):
             match_changes.append(f"Time: {old_match.get('time', 'TBD')} → {new_match.get('time', 'TBD')}")
-
-        # Check score change
         if old_match.get('score') != new_match.get('score'):
             match_changes.append(f"Score: {old_match.get('score', 'TBD')} → {new_match.get('score', 'TBD')}")
-
-        # Check location change
         if old_match.get('location') != new_match.get('location'):
             match_changes.append(f"Location: {old_match.get('location', 'TBD')} → {new_match.get('location', 'TBD')}")
 
@@ -251,20 +224,17 @@ def detect_changes(old_data, new_data):
     return changes, detailed_changes
 
 
-def main():
-    print(f"Checking schedule at {datetime.now().isoformat()}")
-
+def check_schedule(label, url, state_file):
+    """Check a single schedule URL for changes and notify if needed. Returns 0 on success, 1 on error."""
+    print(f"\n--- Checking: {label} ---")
     try:
-        # Fetch and parse schedule
-        html_content = fetch_schedule()
+        html_content = fetch_schedule(url)
         schedule_data = parse_schedule(html_content)
         current_hash = calculate_hash(schedule_data)
 
-        # Load previous state
-        previous_state = load_previous_state()
+        previous_state = load_previous_state(state_file)
         previous_hash = previous_state['hash'] if previous_state else None
 
-        # Check for changes
         if current_hash != previous_hash:
             print("Schedule has changed!")
 
@@ -273,20 +243,18 @@ def main():
                 schedule_data
             )
 
-            # Send notification
-            title = "⚽ AFC Schedule Updated!"
+            title = f"⚽ AFC Schedule Updated — {label}"
 
-            # Build message with detailed changes
             if detailed_changes:
                 changes_text = '\n'.join(detailed_changes)
             else:
                 changes_text = '\n'.join(f'• {change}' for change in changes)
 
-            message = f"""The Ambassadors FC schedule has been updated.
+            message = f"""The schedule has been updated.
 
 {changes_text}
 
-View schedule: {SCHEDULE_URL}
+View schedule: {url}
 
 Last checked: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
 
@@ -297,8 +265,7 @@ Last checked: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
                 tags=["soccer", "warning"]
             )
 
-            # Save new state
-            save_state(schedule_data, current_hash)
+            save_state(state_file, schedule_data, current_hash)
             print("State updated and notification sent")
         else:
             print("No changes detected")
@@ -306,20 +273,29 @@ Last checked: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
         return 0
 
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-
-        # Send error notification
+        print(f"Error checking {label}: {e}", file=sys.stderr)
         try:
             send_notification(
-                title="❌ AFC Monitor Error",
+                title=f"❌ AFC Monitor Error — {label}",
                 message=f"Failed to check schedule: {str(e)}",
                 priority="low",
                 tags=["warning", "error"]
             )
-        except:
+        except Exception:
             pass
-
         return 1
+
+
+def main():
+    print(f"Checking schedules at {datetime.now().isoformat()}")
+
+    exit_code = 0
+    for label, url, state_file in SCHEDULES:
+        result = check_schedule(label, url, state_file)
+        if result != 0:
+            exit_code = result
+
+    return exit_code
 
 
 if __name__ == "__main__":
